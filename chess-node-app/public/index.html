@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Node.js Multiplayer Chess</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <style>
+        :root {
+            --light-square: #eeeed2;
+            --dark-square: #769656;
+            --highlight: rgba(255, 255, 0, 0.5);
+        }
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #333;
+            color: white;
+            margin: 0;
+            padding-top: 20px;
+        }
+        .board-container {
+            display: grid;
+            grid-template-columns: repeat(8, 60px);
+            grid-template-rows: repeat(8, 60px);
+            border: 5px solid #555;
+            user-select: none;
+        }
+        .square {
+            width: 60px;
+            height: 60px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        .square.light { background-color: var(--light-square); }
+        .square.dark { background-color: var(--dark-square); }
+        .piece {
+            width: 100%;
+            height: 100%;
+            background-size: cover;
+            cursor: pointer;
+            z-index: 2;
+        }
+        .selected { background-color: rgba(100, 255, 100, 0.6) !important; }
+        .controls { margin-top: 15px; }
+        button { padding: 8px 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <h1>Multiplayer Node Chess</h1>
+    <div id="status">Connecting...</div>
+    <div id="board" class="board-container"></div>
+    <div class="controls">
+        <button onclick="requestReset()">Reset Game</button>
+        <button onclick="flipBoard()">Flip Board</button>
+    </div>
+
+    <script>
+        const socket = io();
+        const game = new Chess(); // Client-side instance just for move generation/checking
+        const boardElement = document.getElementById('board');
+        const statusElement = document.getElementById('status');
+        
+        let selectedSquare = null;
+        let orientation = 'white';
+
+        const PIECES = {
+            'w': { 'p': 'https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg', 'n': 'https://upload.wikimedia.org/wikipedia/commons/7/70/Chess_nlt45.svg', 'b': 'https://upload.wikimedia.org/wikipedia/commons/b/b1/Chess_blt45.svg', 'r': 'https://upload.wikimedia.org/wikipedia/commons/7/72/Chess_rlt45.svg', 'q': 'https://upload.wikimedia.org/wikipedia/commons/1/15/Chess_qlt45.svg', 'k': 'https://upload.wikimedia.org/wikipedia/commons/4/42/Chess_klt45.svg' },
+            'b': { 'p': 'https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg', 'n': 'https://upload.wikimedia.org/wikipedia/commons/e/ef/Chess_ndt45.svg', 'b': 'https://upload.wikimedia.org/wikipedia/commons/9/98/Chess_bdt45.svg', 'r': 'https://upload.wikimedia.org/wikipedia/commons/f/ff/Chess_rdt45.svg', 'q': 'https://upload.wikimedia.org/wikipedia/commons/4/47/Chess_qdt45.svg', 'k': 'https://upload.wikimedia.org/wikipedia/commons/f/f0/Chess_kdt45.svg' }
+        };
+
+        // --- SOCKET EVENTS ---
+
+        // 1. Receive Board State from Server
+        socket.on('boardState', (fen) => {
+            game.load(fen); // Update local logic
+            selectedSquare = null; // Deselect
+            renderBoard();
+            updateStatus();
+        });
+
+        // 2. Game Over
+        socket.on('gameOver', (reason) => {
+            alert("Game Over: " + reason);
+        });
+
+        // --- RENDERING ---
+
+        function renderBoard() {
+            boardElement.innerHTML = '';
+            const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+            const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
+            
+            const displayRanks = orientation === 'white' ? ranks : [...ranks].reverse();
+            const displayFiles = orientation === 'white' ? files : [...files].reverse();
+
+            displayRanks.forEach(r => {
+                displayFiles.forEach(f => {
+                    const squareId = f + r;
+                    const div = document.createElement('div');
+                    div.classList.add('square');
+                    div.classList.add((files.indexOf(f) + ranks.indexOf(r)) % 2 === 0 ? 'light' : 'dark');
+                    div.id = squareId;
+                    div.onclick = () => handleSquareClick(squareId);
+
+                    const piece = game.get(squareId);
+                    if (piece) {
+                        const img = document.createElement('div');
+                        img.classList.add('piece');
+                        img.style.backgroundImage = `url(${PIECES[piece.color][piece.type]})`;
+                        div.appendChild(img);
+                    }
+
+                    if (selectedSquare === squareId) {
+                        div.classList.add('selected');
+                    }
+                    
+                    boardElement.appendChild(div);
+                });
+            });
+        }
+
+        function handleSquareClick(squareId) {
+            // Logic: 
+            // 1. If we have a selected square, try to move to the clicked square.
+            // 2. Send that move to the server.
+            
+            if (selectedSquare) {
+                // Construct move object
+                const move = {
+                    from: selectedSquare,
+                    to: squareId,
+                    promotion: 'q' // Simplified: always queen
+                };
+
+                // Check client-side if it looks legal (for better UX)
+                const legalMoves = game.moves({verbose: true});
+                const isLegal = legalMoves.some(m => m.from === move.from && m.to === move.to);
+
+                if (isLegal) {
+                    // Send to server
+                    socket.emit('move', move);
+                    selectedSquare = null; // Optimistic cleanup
+                } else {
+                    // If illegal locally, check if user just clicked a different piece of their own
+                    const piece = game.get(squareId);
+                    if (piece && piece.color === game.turn()) {
+                        selectedSquare = squareId;
+                    } else {
+                        selectedSquare = null;
+                    }
+                }
+                renderBoard(); // Re-render to show/hide selection
+            } else {
+                // Select a piece
+                const piece = game.get(squareId);
+                if (piece && piece.color === game.turn()) {
+                    selectedSquare = squareId;
+                    renderBoard();
+                }
+            }
+        }
+
+        function updateStatus() {
+            let status = '';
+            let moveColor = game.turn() === 'w' ? 'White' : 'Black';
+            if (game.in_checkmate()) status = "Game Over: Checkmate";
+            else if (game.in_draw()) status = "Game Over: Draw";
+            else {
+                status = moveColor + " to move";
+                if (game.in_check()) status += " (Check!)";
+            }
+            statusElement.innerText = status;
+        }
+
+        function requestReset() {
+            socket.emit('reset');
+        }
+
+        function flipBoard() {
+            orientation = orientation === 'white' ? 'black' : 'white';
+            renderBoard();
+        }
+    </script>
+</body>
+</html>
